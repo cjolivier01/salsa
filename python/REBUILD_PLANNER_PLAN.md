@@ -49,6 +49,11 @@ identity and returning optimizer-repair data.
    - Record parameter ids removed by rebuilt/removed modules.
    - Record parameters introduced by rebuilt/added modules.
    - Provide a helper to mutate optimizer param groups and prune stale state.
+   - Preserve optimizer parameter-group placement when callers pass the
+     optimizer to `ModelMorpher.apply(...)`.
+   - Preserve still-live shared parameters when one aliasing component is
+     removed.
+   - Reject overlapping parent/child component paths explicitly.
 
 3. Add PyTorch golden tests.
    - Head-only config change replaces only `model.heads["object_detection"]`.

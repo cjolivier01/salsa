@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -177,6 +177,7 @@ class OptimizerRepair:
 
     removed_parameter_ids: tuple[int, ...]
     added_parameters: tuple[Any, ...]
+    added_parameter_groups: tuple[tuple[int | None, tuple[Any, ...]], ...] = ()
 
     def apply_to(self, optimizer: Any) -> None:
         """Mutate a PyTorch optimizer so it tracks the morphed model."""
@@ -189,18 +190,29 @@ class OptimizerRepair:
                 if id(param) in removed:
                     del optimizer.state[param]
 
-        if not self.added_parameters:
-            return
+        additions_by_group = self.added_parameter_groups
+        if not additions_by_group and self.added_parameters:
+            additions_by_group = ((0, self.added_parameters),)
 
         known = {id(param) for group in optimizer.param_groups for param in group["params"]}
-        additions = [param for param in self.added_parameters if id(param) not in known]
-        if not additions:
-            return
+        seen = set(known)
+        for group_index, params in additions_by_group:
+            additions = []
+            for param in params:
+                param_id = id(param)
+                if param_id in seen:
+                    continue
+                seen.add(param_id)
+                additions.append(param)
+            if not additions:
+                continue
 
-        if optimizer.param_groups:
-            optimizer.param_groups[0]["params"].extend(additions)
-        else:  # pragma: no cover - torch optimizers normally require params
-            optimizer.add_param_group({"params": additions})
+            if group_index is not None and group_index < len(optimizer.param_groups):
+                optimizer.param_groups[group_index]["params"].extend(additions)
+            elif optimizer.param_groups:
+                optimizer.param_groups[0]["params"].extend(additions)
+            else:  # pragma: no cover - torch optimizers normally require params
+                optimizer.add_param_group({"params": additions})
 
 
 @dataclass(frozen=True)
@@ -222,7 +234,10 @@ def _normalize_path(path: ModulePath) -> tuple[str, ...]:
     if isinstance(path, str):
         if not path:
             raise ValueError("module paths cannot be empty")
-        return tuple(path.split("."))
+        normalized = tuple(path.split("."))
+        if not all(normalized):
+            raise ValueError("module paths cannot contain empty segments")
+        return normalized
     normalized = tuple(path)
     if not normalized:
         raise ValueError("module paths cannot be empty")
@@ -282,17 +297,97 @@ def _del_module(root: Any, path: tuple[str, ...]) -> Any | None:
 
 def _parameters_of(modules: Iterator[Any] | list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
     parameters = []
+    seen = set()
     for module in modules:
         if module is None:
             continue
-        parameters.extend(module.parameters())
+        for parameter in module.parameters():
+            parameter_id = id(parameter)
+            if parameter_id in seen:
+                continue
+            seen.add(parameter_id)
+            parameters.append(parameter)
     return tuple(parameters)
+
+
+def _unique_parameters(parameters: Iterable[Any]) -> tuple[Any, ...]:
+    result = []
+    seen = set()
+    for parameter in parameters:
+        if parameter is None:
+            continue
+        parameter_id = id(parameter)
+        if parameter_id in seen:
+            continue
+        seen.add(parameter_id)
+        result.append(parameter)
+    return tuple(result)
+
+
+def _parameters_by_id(modules: Iterator[Any] | list[Any] | tuple[Any, ...]) -> dict[int, Any]:
+    return {id(parameter): parameter for parameter in _parameters_of(modules)}
+
+
+def _parameters_grouped_like(old_module: Any | None, new_module: Any, group_lookup: dict[int, int]) -> tuple[tuple[int | None, tuple[Any, ...]], ...]:
+    new_params = _parameters_of([new_module])
+    if old_module is None:
+        return ((None, new_params),)
+
+    old_params = _parameters_of([old_module])
+    by_group: dict[int | None, list[Any]] = {}
+    for index, param in enumerate(new_params):
+        old_group = group_lookup.get(id(old_params[index])) if index < len(old_params) else None
+        by_group.setdefault(old_group, []).append(param)
+    return tuple((group, tuple(params)) for group, params in by_group.items())
+
+
+def _optimizer_group_lookup(optimizer: Any | None) -> dict[int, int]:
+    if optimizer is None:
+        return {}
+    lookup = {}
+    for index, group in enumerate(optimizer.param_groups):
+        for parameter in group["params"]:
+            lookup[id(parameter)] = index
+    return lookup
+
+
+def _sort_paths_for_add(paths: Iterable[tuple[str, ...]]) -> tuple[tuple[str, ...], ...]:
+    return tuple(sorted(paths, key=lambda path: (len(path), path)))
+
+
+def _sort_paths_for_remove(paths: Iterable[tuple[str, ...]]) -> tuple[tuple[str, ...], ...]:
+    return tuple(sorted(paths, key=lambda path: (-len(path), path)))
+
+
+def _has_path_prefix(path: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    return len(path) > len(prefix) and path[: len(prefix)] == prefix
+
+
+def _validate_unique_paths(items: Iterable[tuple[ComponentTarget, tuple[str, ...]]]) -> None:
+    seen: dict[tuple[str, ...], ComponentTarget] = {}
+    for component, path in items:
+        if path in seen:
+            raise ValueError(f"multiple components resolve to path {_path_label(path)!r}")
+        seen[path] = component
+
+
+def _validate_non_overlapping_paths(items: Iterable[tuple[ComponentTarget, tuple[str, ...]]]) -> None:
+    paths = list(items)
+    _validate_unique_paths(paths)
+    for index, (component, path) in enumerate(paths):
+        for other_component, other_path in paths[index + 1 :]:
+            if _has_path_prefix(path, other_path) or _has_path_prefix(other_path, path):
+                raise ValueError(
+                    "component paths must not overlap: "
+                    f"{component.label()} -> {_path_label(path)!r}, "
+                    f"{other_component.label()} -> {_path_label(other_path)!r}"
+                )
 
 
 def _assert_morphable(root: Any) -> None:
     typ = type(root)
     name = f"{typ.__module__}.{typ.__qualname__}"
-    if "DistributedDataParallel" in name or "FullyShardedDataParallel" in name:
+    if "DistributedDataParallel" in name or "FullyShardedDataParallel" in name or "DataParallel" in name:
         raise RuntimeError(f"refusing to morph wrapped model {name}")
     if hasattr(root, "_fsdp_wrapped_module"):
         raise RuntimeError("refusing to morph FSDP-wrapped model")
@@ -324,8 +419,11 @@ class ModelMorpher:
     def install(self, snapshot: ComponentSnapshot) -> MorphResult:
         paths = []
         new_modules = []
-        for target, value in snapshot.values.items():
-            path = self.path(target)
+        path_items = [(target, self.path(target)) for target in snapshot.values]
+        _validate_non_overlapping_paths(path_items)
+        values_by_path = {path: snapshot.values[target] for target, path in path_items}
+        for path in _sort_paths_for_add(values_by_path):
+            value = values_by_path[path]
             _set_module(self.root, path, value)
             paths.append(path)
             new_modules.append(value)
@@ -338,36 +436,53 @@ class ModelMorpher:
             added_paths=tuple(paths),
             rebuilt_paths=(),
             removed_paths=(),
-            optimizer_repair=OptimizerRepair((), _parameters_of(new_modules)),
+            optimizer_repair=OptimizerRepair((), _parameters_of(new_modules), ((None, _parameters_of(new_modules)),)),
         )
 
-    def apply(self, snapshot: ComponentSnapshot, report: RebuildReport) -> MorphResult:
+    def apply(self, snapshot: ComponentSnapshot, report: RebuildReport, *, optimizer: Any | None = None) -> MorphResult:
         removed_modules = []
-        added_modules = []
+        added_group_entries = []
         added_paths = []
         rebuilt_paths = []
         removed_paths = []
 
-        for component in report.removed:
-            path = self.path(component)
+        group_lookup = _optimizer_group_lookup(optimizer)
+        removed_items = [(component, self.path(component)) for component in report.removed]
+        rebuilt_items = [(component, self.path(component)) for component in report.rebuilt]
+        added_items = [(component, self.path(component)) for component in report.added]
+        _validate_non_overlapping_paths((*removed_items, *rebuilt_items, *added_items))
+
+        rebuilt_by_path = {path: component for component, path in rebuilt_items}
+        added_by_path = {path: component for component, path in added_items}
+        removed_by_path = {path: component for component, path in removed_items}
+
+        for path in _sort_paths_for_remove(removed_by_path):
             removed_modules.append(_del_module(self.root, path))
             removed_paths.append(path)
 
-        for component in report.rebuilt:
-            path = self.path(component)
-            removed_modules.append(_get_module(self.root, path))
-            _set_module(self.root, path, snapshot.values[component])
-            added_modules.append(snapshot.values[component])
+        old_rebuilt_modules = {}
+        for path in _sort_paths_for_add(rebuilt_by_path):
+            component = rebuilt_by_path[path]
+            old_module = _get_module(self.root, path)
+            old_rebuilt_modules[path] = old_module
+            removed_modules.append(old_module)
+            new_module = snapshot.values[component]
+            _set_module(self.root, path, new_module)
+            added_group_entries.extend(_parameters_grouped_like(old_module, new_module, group_lookup))
             rebuilt_paths.append(path)
 
-        for component in report.added:
-            path = self.path(component)
-            _set_module(self.root, path, snapshot.values[component])
-            added_modules.append(snapshot.values[component])
+        for path in _sort_paths_for_add(added_by_path):
+            component = added_by_path[path]
+            new_module = snapshot.values[component]
+            _set_module(self.root, path, new_module)
+            added_group_entries.extend(_parameters_grouped_like(None, new_module, group_lookup))
             added_paths.append(path)
 
         self._refresh()
-        removed_parameter_ids = tuple(sorted({id(param) for param in _parameters_of(removed_modules)}))
+        removed_parameter_ids = {id(param) for param in _parameters_of(removed_modules)}
+        live_parameter_ids = {id(param) for param in self.root.parameters()}
+        removed_parameter_ids -= live_parameter_ids
+        added_parameters = _unique_parameters(parameter for _, params in added_group_entries for parameter in params)
         return MorphResult(
             added=report.added,
             rebuilt=report.rebuilt,
@@ -376,7 +491,11 @@ class ModelMorpher:
             added_paths=tuple(added_paths),
             rebuilt_paths=tuple(rebuilt_paths),
             removed_paths=tuple(removed_paths),
-            optimizer_repair=OptimizerRepair(removed_parameter_ids, _parameters_of(added_modules)),
+            optimizer_repair=OptimizerRepair(
+                tuple(sorted(removed_parameter_ids)),
+                added_parameters,
+                tuple(added_group_entries),
+            ),
         )
 
     def _refresh(self) -> None:

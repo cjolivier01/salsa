@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from pysalsa import ComponentGraph, RebuildPlanner, target
+from pysalsa import ComponentGraph, ComponentSnapshot, RebuildPlanner, RebuildReport, target
 from pysalsa.pytorch import ModelMorpher, modules_equivalent
 
 
@@ -163,7 +164,7 @@ def test_head_only_change_replaces_one_head_and_repairs_optimizer() -> None:
     next_config = config()
     next_config["tasks"]["object_detection"]["head_config"]["hidden_dim"] = 32
     report = planner.rebuild(next_config)
-    result = morpher.apply(planner.snapshot, report)
+    result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
     result.refresh_optimizer(optimizer)
 
     assert model.encoders["image"] is old_encoder
@@ -222,7 +223,7 @@ def test_added_task_inserts_new_feature_and_head() -> None:
         "input_mapping": {"feature_modules.unused": "main"},
     }
     report = planner.rebuild(next_config)
-    result = morpher.apply(planner.snapshot, report)
+    result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
     result.refresh_optimizer(optimizer)
 
     assert "unused" in model.feature_modules
@@ -241,7 +242,10 @@ def test_removed_task_deletes_head_and_pruned_feature() -> None:
     next_config = config()
     del next_config["tasks"]["boundary_detection"]
     report = planner.rebuild(next_config)
-    result = morpher.apply(planner.snapshot, report)
+    for param in model.heads["boundary_detection"].parameters():
+        optimizer.state[param]["momentum_buffer"] = torch.ones_like(param)
+
+    result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
     result.refresh_optimizer(optimizer)
 
     assert "boundary_detection" not in model.heads
@@ -251,6 +255,7 @@ def test_removed_task_deletes_head_and_pruned_feature() -> None:
         "head:boundary_detection",
     ]
     assert old_head_param_ids.isdisjoint(optimizer_param_ids(optimizer))
+    assert all(id(param) not in old_head_param_ids for param in optimizer.state)
 
 
 def test_rejects_distributed_wrapped_models() -> None:
@@ -262,3 +267,109 @@ def test_rejects_distributed_wrapped_models() -> None:
 
     with pytest.raises(RuntimeError, match="wrapped model"):
         ModelMorpher(DistributedDataParallel(), path_for)
+
+
+def test_optimizer_repair_preserves_parameter_group_for_rebuilt_module() -> None:
+    planner, model, morpher, _ = make_model()
+    optimizer = torch.optim.SGD(
+        [
+            {"params": model.encoders.parameters(), "lr": 0.01},
+            {"params": model.heads["object_detection"].parameters(), "lr": 0.2},
+            {"params": model.heads["boundary_detection"].parameters(), "lr": 0.3},
+        ]
+    )
+
+    next_config = config()
+    next_config["tasks"]["object_detection"]["head_config"]["hidden_dim"] = 32
+    report = planner.rebuild(next_config)
+    result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
+    result.refresh_optimizer(optimizer)
+
+    new_head_param_ids = {id(param) for param in model.heads["object_detection"].parameters()}
+    assert new_head_param_ids <= {id(param) for param in optimizer.param_groups[1]["params"]}
+    assert new_head_param_ids.isdisjoint({id(param) for param in optimizer.param_groups[0]["params"]})
+    assert optimizer.param_groups[1]["lr"] == 0.2
+
+
+class SharedParamModule(torch.nn.Module):
+    def __init__(self, parameter: torch.nn.Parameter) -> None:
+        super().__init__()
+        self.weight = parameter
+
+
+def test_optimizer_repair_preserves_still_live_shared_parameters() -> None:
+    shared = torch.nn.Parameter(torch.ones(2, 2))
+    root = torch.nn.Module()
+    root.mods = torch.nn.ModuleDict(
+        {
+            "keep": SharedParamModule(shared),
+            "drop": SharedParamModule(shared),
+        }
+    )
+    optimizer = torch.optim.SGD(root.parameters(), lr=0.1, momentum=0.9)
+    optimizer.state[shared]["momentum_buffer"] = torch.ones_like(shared)
+
+    def shared_path(component):
+        return ("mods", component.key[0])
+
+    morpher = ModelMorpher(root, shared_path)
+    keep = target("mod", "keep")
+    drop = target("mod", "drop")
+    report = RebuildReport(
+        added=(),
+        rebuilt=(),
+        removed=(drop,),
+        reused=(keep,),
+        executed=(),
+        executed_targets=(),
+    )
+    snapshot = ComponentSnapshot(MappingProxyType({keep: root.mods["keep"]}))
+    result = morpher.apply(snapshot, report, optimizer=optimizer)
+    result.refresh_optimizer(optimizer)
+
+    assert "drop" not in root.mods
+    assert shared in optimizer.param_groups[0]["params"]
+    assert shared in optimizer.state
+    assert result.optimizer_repair.removed_parameter_ids == ()
+
+
+def test_overlapping_component_paths_are_rejected() -> None:
+    root = torch.nn.Module()
+    root.parent = torch.nn.Module()
+
+    def nested_path(component):
+        if component.name == "parent":
+            return ("parent",)
+        return ("parent", "child")
+
+    morpher = ModelMorpher(root, nested_path)
+    parent = target("parent")
+    child = target("child")
+    snapshot = ComponentSnapshot(
+        MappingProxyType(
+            {
+                parent: torch.nn.Module(),
+                child: torch.nn.Linear(1, 1),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="must not overlap"):
+        morpher.install(snapshot)
+
+
+def test_string_module_paths_reject_empty_segments() -> None:
+    root = torch.nn.Module()
+    root.heads = torch.nn.ModuleDict()
+    morpher = ModelMorpher(root, lambda component: "heads.")
+    snapshot = ComponentSnapshot(MappingProxyType({target("head", "x"): torch.nn.Linear(1, 1)}))
+
+    with pytest.raises(ValueError, match="empty segments"):
+        morpher.install(snapshot)
+
+
+def test_rejects_data_parallel_wrapped_models() -> None:
+    wrapped = torch.nn.DataParallel(torch.nn.Linear(1, 1))
+
+    with pytest.raises(RuntimeError, match="wrapped model"):
+        ModelMorpher(wrapped, path_for)

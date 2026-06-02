@@ -120,13 +120,17 @@ morpher = ModelMorpher(model, path_for, refresh=lambda root: root.rebuild_caches
 morpher.install(planner.snapshot)
 
 report = planner.rebuild(next_yaml_dict)
-result = morpher.apply(planner.snapshot, report)
+result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
 result.refresh_optimizer(optimizer)
 ```
 
 The morpher replaces only added and rebuilt modules, removes disappeared
 targets, leaves reused modules untouched, and returns parameter ids/objects
 needed to repair optimizer param groups.
+Pass the optimizer to `apply` when preserving per-group settings matters.
+Component paths must be unique and non-overlapping; nested module paths are
+supported, but one component path cannot be the parent of another component path
+in the same morph.
 
 ## Why not bind the Rust crate directly?
 
