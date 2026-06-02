@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
-from pysalsa import ComponentGraph, RebuildPlanner, target
+import pytest
+
+from pysalsa import ComponentGraph, Database, RebuildPlanner, target
 
 
 @dataclass
@@ -150,6 +153,7 @@ def test_golden_one_head_hidden_dim_change_rebuilds_only_that_head() -> None:
             "head:boundary_detection",
         ],
         "executed": ["head:object_detection"],
+        "executed_targets": ["head:object_detection"],
         "rebuild_set": ["head:object_detection"],
     }
     assert config["tasks"]["object_detection"]["head_config"]["hidden_dim"] == 256
@@ -172,6 +176,7 @@ def test_golden_unrelated_task_metadata_change_rebuilds_nothing() -> None:
             "head:object_detection",
         ],
         "executed": [],
+        "executed_targets": [],
         "rebuild_set": [],
     }
 
@@ -193,6 +198,13 @@ def test_golden_encoder_shape_change_cascades_to_features_and_heads() -> None:
         "removed": [],
         "reused": [],
         "executed": [
+            "encoder:image",
+            "feature:bev_feature_module",
+            "feature:boundary_feature_module",
+            "head:boundary_detection",
+            "head:object_detection",
+        ],
+        "executed_targets": [
             "encoder:image",
             "feature:bev_feature_module",
             "feature:boundary_feature_module",
@@ -230,5 +242,104 @@ def test_golden_add_task_adds_previously_pruned_feature_and_head() -> None:
             "head:object_detection",
         ],
         "executed": ["feature:unused_feature_module", "head:lane_detection"],
+        "executed_targets": ["feature:unused_feature_module", "head:lane_detection"],
         "rebuild_set": ["feature:unused_feature_module", "head:lane_detection"],
     }
+
+
+def test_golden_remove_task_removes_head_and_preserves_dependencies() -> None:
+    planner, _ = make_planner()
+    next_config = neural_config()
+    del next_config["tasks"]["boundary_detection"]
+
+    assert planner.rebuild(next_config).to_golden() == {
+        "added": [],
+        "rebuilt": [],
+        "removed": ["feature:boundary_feature_module", "head:boundary_detection"],
+        "reused": [
+            "encoder:image",
+            "feature:bev_feature_module",
+            "head:object_detection",
+        ],
+        "executed": [],
+        "executed_targets": [],
+        "rebuild_set": [],
+    }
+
+
+def test_planner_uses_config_input_owner_and_applies_initial_config() -> None:
+    db = Database()
+    config_input = db.config({"value": 0})
+    graph = ComponentGraph()
+
+    @graph.component("value")
+    def value(ctx):
+        return ctx.read("value")
+
+    planner = RebuildPlanner(
+        graph,
+        {"value": 1},
+        lambda config: [target("value")],
+        config_input=config_input,
+    )
+
+    assert planner.db is db
+    assert planner.snapshot.values[target("value")] == 1
+
+
+def test_planner_rejects_config_input_with_mismatched_database() -> None:
+    db1 = Database()
+    db2 = Database()
+    config_input = db1.config({})
+
+    with pytest.raises(ValueError, match="owned by the provided Database"):
+        RebuildPlanner(
+            ComponentGraph(),
+            {},
+            lambda config: [],
+            db=db2,
+            config_input=config_input,
+        )
+
+
+def test_executed_reports_dependency_components_outside_selected_targets() -> None:
+    graph = ComponentGraph()
+
+    @graph.component("dep")
+    def dep(ctx):
+        return ctx.read("dep")
+
+    @graph.component("root")
+    def root(ctx):
+        return ctx.component("dep")
+
+    planner = RebuildPlanner(graph, {"dep": 1}, lambda config: [target("root")])
+    report = planner.rebuild({"dep": 2})
+
+    assert report.to_golden()["executed"] == ["dep", "root"]
+    assert report.to_golden()["executed_targets"] == ["root"]
+
+
+def test_reports_sort_mixed_dynamic_key_types() -> None:
+    graph = ComponentGraph()
+
+    @graph.component("x")
+    def x(ctx, key):
+        return ctx.read((str(key),))
+
+    planner = RebuildPlanner(
+        graph,
+        {"1": 1, "a": 1},
+        lambda config: [target("x", 1), target("x", "a")],
+    )
+    report = planner.rebuild({"1": 2, "a": 2})
+
+    assert report.to_golden()["rebuilt"] == ["x:1", "x:a"]
+
+
+def test_snapshot_values_are_read_only() -> None:
+    planner, _ = make_planner()
+
+    assert isinstance(planner.snapshot.values, MappingProxyType)
+    with pytest.raises(TypeError):
+        planner.snapshot.values[target("head", "object_detection")] = BuiltModule("bad", ())

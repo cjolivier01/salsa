@@ -96,6 +96,10 @@ report = planner.rebuild(next_yaml_dict)
 print(report.to_golden()["rebuild_set"])
 ```
 
+`report.executed` includes every component builder that actually ran, including
+dependencies outside the selected target set. `report.executed_targets` is the
+selected-target-only subset.
+
 The first planner tests use synthetic neural-net YAML examples to lock down
 expected rebuild sets for head-only edits, unrelated metadata edits, encoder
 shape cascades, and adding tasks that require previously pruned feature modules.

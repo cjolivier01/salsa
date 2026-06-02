@@ -28,6 +28,9 @@ YAML edits.
    - Change encoder shape: rebuild encoder, dependent features, and heads.
    - Add a task that requires a previously pruned feature module: add that
      feature module and the new head.
+   - Remove a task: remove its head and any now-pruned feature modules.
+   - Cover planner API edge cases for supplied `ConfigInput`, dependency
+     execution reporting, mixed dynamic keys, and snapshot immutability.
 
 4. Keep the implementation independent of PyTorch runtime classes.
    - The planner works with arbitrary Python component values.

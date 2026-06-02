@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from .build import ComponentGraph
 from .core import ConfigInput, Database
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class ComponentTarget:
     """A named component and dynamic key to build through `ComponentGraph`."""
 
@@ -23,7 +24,9 @@ class ComponentTarget:
 
 
 def target(name: str, *key: Any) -> ComponentTarget:
-    return ComponentTarget(name, tuple(key))
+    normalized_key = tuple(key)
+    hash(normalized_key)
+    return ComponentTarget(name, normalized_key)
 
 
 def _normalize_target(value: ComponentTarget | str | tuple[Any, ...]) -> ComponentTarget:
@@ -36,7 +39,17 @@ def _normalize_target(value: ComponentTarget | str | tuple[Any, ...]) -> Compone
     name, *key = value
     if not isinstance(name, str):
         raise TypeError("component target tuple names must be strings")
-    return ComponentTarget(name, tuple(key))
+    normalized_key = tuple(key)
+    hash(normalized_key)
+    return ComponentTarget(name, normalized_key)
+
+
+def _target_sort_key(component: ComponentTarget) -> tuple[str, str]:
+    return (component.name, repr(component.key))
+
+
+def _sort_targets(targets: Iterable[ComponentTarget]) -> tuple[ComponentTarget, ...]:
+    return tuple(sorted(targets, key=_target_sort_key))
 
 
 @dataclass(frozen=True)
@@ -44,7 +57,7 @@ class ComponentSnapshot:
     values: Mapping[ComponentTarget, Any]
 
     def labels(self) -> list[str]:
-        return sorted(target.label() for target in self.values)
+        return sorted(component.label() for component in self.values)
 
 
 @dataclass(frozen=True)
@@ -54,10 +67,11 @@ class RebuildReport:
     rebuilt: tuple[ComponentTarget, ...]
     reused: tuple[ComponentTarget, ...]
     executed: tuple[ComponentTarget, ...]
+    executed_targets: tuple[ComponentTarget, ...]
 
     @property
     def rebuild_set(self) -> tuple[ComponentTarget, ...]:
-        return tuple(sorted((*self.added, *self.rebuilt)))
+        return _sort_targets((*self.added, *self.rebuilt))
 
     def labels(self, targets: Iterable[ComponentTarget]) -> list[str]:
         return sorted(target.label() for target in targets)
@@ -69,6 +83,7 @@ class RebuildReport:
             "removed": self.labels(self.removed),
             "reused": self.labels(self.reused),
             "executed": self.labels(self.executed),
+            "executed_targets": self.labels(self.executed_targets),
             "rebuild_set": self.labels(self.rebuild_set),
         }
 
@@ -94,10 +109,14 @@ class RebuildPlanner:
         config_input: ConfigInput | None = None,
     ) -> None:
         self.graph = graph
-        self.db = db or Database()
         if config_input is not None:
+            if db is not None and config_input._db is not db:
+                raise ValueError("config_input must be owned by the provided Database")
+            self.db = config_input._db
             self.config = config_input
+            self.config.set(config)
         else:
+            self.db = db or Database()
             self.config = self.db.config(config)
         self._select_targets = targets
         self.snapshot = self._build_snapshot(config)
@@ -121,7 +140,7 @@ class RebuildPlanner:
                 component.name,
                 *component.key,
             )
-        return ComponentSnapshot(values)
+        return ComponentSnapshot(MappingProxyType(values))
 
     def rebuild(self, config: Any) -> RebuildReport:
         old_snapshot = self.snapshot
@@ -147,13 +166,14 @@ class RebuildPlanner:
         executed = {
             ComponentTarget(name, key)
             for name, key in self.graph.executions()
-            if ComponentTarget(name, key) in new_targets
         }
+        executed_targets = executed & new_targets
 
         return RebuildReport(
-            added=tuple(sorted(added)),
-            removed=tuple(sorted(removed)),
-            rebuilt=tuple(sorted(rebuilt)),
-            reused=tuple(sorted(reused)),
-            executed=tuple(sorted(executed)),
+            added=_sort_targets(added),
+            removed=_sort_targets(removed),
+            rebuilt=_sort_targets(rebuilt),
+            reused=_sort_targets(reused),
+            executed=_sort_targets(executed),
+            executed_targets=_sort_targets(executed_targets),
         )
