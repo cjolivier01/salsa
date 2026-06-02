@@ -64,6 +64,7 @@ class ComponentGraph:
         self._specs: dict[str, ComponentSpec] = {}
         self._versions: dict[str, int] = {}
         self._frozen = False
+        self._executions: list[tuple[str, tuple[Any, ...]]] = []
 
     def component(
         self,
@@ -99,8 +100,17 @@ class ComponentGraph:
         )
 
     def build(self, db: Database, config: ConfigInput, name: str, *key: Any) -> Any:
+        return self.build_result(db, config, name, *key).value
+
+    def build_result(self, db: Database, config: ConfigInput, name: str, *key: Any) -> ComponentResult:
         self._frozen = True
-        return _build_component(db, self, config, name, tuple(key)).value
+        return _build_component(db, self, config, name, tuple(key))
+
+    def clear_executions(self) -> None:
+        self._executions.clear()
+
+    def executions(self) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+        return tuple(self._executions)
 
 
 @tracked(equals=_component_results_equivalent, reuse_on_equal=True)
@@ -115,6 +125,7 @@ def _build_component(
         spec = graph._specs[name]
     except KeyError as exc:
         raise KeyError(f"unknown component {name!r}") from exc
+    graph._executions.append((name, key))
     ctx = ComponentContext(db, graph, config, key)
     value = spec.builder(ctx, *key)
     return ComponentResult(
