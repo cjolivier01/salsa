@@ -10,7 +10,7 @@ The planner now produces deterministic rebuild reports. The next layer applies
 those reports to PyTorch `nn.Module` trees while preserving unchanged object
 identity and returning optimizer-repair data.
 
-## Completed So Far
+## Previously Completed PyTorch Morpher
 
 1. Add a `RebuildPlanner` API.
    - Keep a `Database` and `ConfigInput` for a model config.
@@ -36,6 +36,29 @@ identity and returning optimizer-repair data.
    - The planner works with arbitrary Python component values.
 
 ## Current PR Scope
+
+1. Add a PyTorch post-pass framework.
+   - Define `PostPass`, `PostPassManager`, and `PostPassResult`.
+   - Let passes decide whether they should run for the changed module paths
+     reported by a morph.
+   - Keep pass application explicit and idempotent.
+
+2. Add idempotent parameter tying.
+   - Apply primary-to-alias module identity sharing.
+   - Reapplying is a no-op.
+   - Reapplying after a morph restores alias identity.
+
+3. Add low-precision forward patching.
+   - Patch `Linear`/`Conv2d` once.
+   - Store the true original forward.
+   - Reapplying with new state updates state without double-wrapping.
+   - Disabling restores the original forward and removes patch markers.
+
+4. Add annotation refresh.
+   - Recompute `_annotation` paths after morphs.
+   - Newly inserted modules receive correct paths.
+
+## Completed So Far
 
 1. Add a PyTorch `ModelMorpher`.
    - Install an initial `ComponentSnapshot` into a root `nn.Module`.
@@ -65,11 +88,8 @@ identity and returning optimizer-repair data.
 
 ## Remaining After This PR
 
-1. Model idempotent post-passes.
+1. Model the remaining idempotent post-passes.
    - Adapter injection.
-   - Low-precision forward patching.
-   - Parameter tying.
-   - Annotation naming.
    - State-dict pre-hook registration.
    - Export singleton reset/guard behavior.
 

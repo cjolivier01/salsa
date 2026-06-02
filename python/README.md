@@ -132,6 +132,35 @@ Component paths must be unique and non-overlapping; nested module paths are
 supported, but one component path cannot be the parent of another component path
 in the same morph.
 
+## PyTorch post-passes
+
+`PostPassManager` runs idempotent tree mutations after a morph:
+
+```python
+from pysalsa.pytorch_postpass import (
+    AnnotationPass,
+    LowPrecisionPatchPass,
+    LowPrecisionState,
+    ParameterTyingPass,
+    PostPassManager,
+)
+
+manager = PostPassManager(
+    [
+        ParameterTyingPass([["encoders.cam_a", "encoders.cam_b"]]),
+        LowPrecisionPatchPass(LowPrecisionState(tag="qat"), module_paths=["heads"]),
+        AnnotationPass("MultiTaskNet"),
+    ]
+)
+
+changed_paths = [*result.added_paths, *result.rebuilt_paths, *result.removed_paths]
+manager.apply(model, changed_paths=changed_paths)
+```
+
+The included passes are safe to rerun. Parameter tying restores aliases after a
+partial rebuild, low-precision patching does not double-wrap `forward`, and
+annotation refresh updates paths for newly inserted modules.
+
 ## Why not bind the Rust crate directly?
 
 The Rust implementation gets much of its ergonomics from macros and Rust's type
