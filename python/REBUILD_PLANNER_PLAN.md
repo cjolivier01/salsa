@@ -6,11 +6,11 @@ Build the first production-facing layer on top of the Python Salsa core: a
 planner that can answer which neural-network components are preserved or rebuilt
 after a YAML config change.
 
-The immediate target is not a full in-place `nn.Module` morphing system. It is a
-deterministic rebuild report with golden tests for representative neural-net
-YAML edits.
+The planner now produces deterministic rebuild reports. The next layer applies
+those reports to PyTorch `nn.Module` trees while preserving unchanged object
+identity and returning optimizer-repair data.
 
-## Current PR Scope
+## Completed So Far
 
 1. Add a `RebuildPlanner` API.
    - Keep a `Database` and `ConfigInput` for a model config.
@@ -34,17 +34,33 @@ YAML edits.
 
 4. Keep the implementation independent of PyTorch runtime classes.
    - The planner works with arbitrary Python component values.
-   - PyTorch-specific morphing stays in follow-up work.
+
+## Current PR Scope
+
+1. Add a PyTorch `ModelMorpher`.
+   - Install an initial `ComponentSnapshot` into a root `nn.Module`.
+   - Apply a later `RebuildReport` to replace added/rebuilt submodules.
+   - Remove targets that disappeared from the planner snapshot.
+   - Preserve reused module identities.
+   - Refresh caller-provided caches derived from `named_modules()`.
+   - Reject distributed/FSDP-wrapped models for now.
+
+2. Return optimizer repair information.
+   - Record parameter ids removed by rebuilt/removed modules.
+   - Record parameters introduced by rebuilt/added modules.
+   - Provide a helper to mutate optimizer param groups and prune stale state.
+
+3. Add PyTorch golden tests.
+   - Head-only config change replaces only `model.heads["object_detection"]`.
+   - Unrelated metadata change preserves all module identities.
+   - Encoder shape change replaces encoder, feature modules, and heads.
+   - Added task inserts a new head and newly required feature module.
+   - Removed task deletes its head and no-longer-required feature module.
+   - Optimizer repair removes old params and appends new params.
 
 ## Remaining After This PR
 
-1. Add an in-place PyTorch `MorphableModel` layer.
-   - Replace rebuilt submodules in `ModuleDict`/nested modules.
-   - Preserve unchanged module identity.
-   - Refresh optimizer param groups for replaced parameters.
-   - Recompute caches derived from `named_modules()`.
-
-2. Model idempotent post-passes.
+1. Model idempotent post-passes.
    - Adapter injection.
    - Low-precision forward patching.
    - Parameter tying.
@@ -52,18 +68,18 @@ YAML edits.
    - State-dict pre-hook registration.
    - Export singleton reset/guard behavior.
 
-3. Integrate the real YAML loader.
+2. Integrate the real YAML loader.
    - Recursive merge behavior.
    - Whitelisted list-concat paths.
    - Override hooks.
    - Default-value dependency tracking.
    - Mutation-proof normalized snapshots.
 
-4. Add cross-language conformance tests against Rust Salsa behavior.
+3. Add cross-language conformance tests against Rust Salsa behavior.
    - Shared traces for inputs, dependencies, backdating, cycles, and durability.
    - CI comparison to keep the Python port aligned with Rust semantics.
 
-5. Add deeper Salsa features only if the rebuild layer needs them.
+4. Add deeper Salsa features only if the rebuild layer needs them.
    - Tracked structs.
    - Interning.
    - Accumulators.
