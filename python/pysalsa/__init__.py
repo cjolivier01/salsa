@@ -23,18 +23,24 @@ from .core import (
     tracked,
 )
 from .build import ComponentGraph
+from .rebuild import ComponentSnapshot, ComponentTarget, RebuildPlanner, RebuildReport, target
 
 __all__ = [
     "MISSING",
     "ConfigInput",
     "ComponentGraph",
+    "ComponentSnapshot",
+    "ComponentTarget",
     "CycleError",
     "Database",
     "Durability",
     "Input",
+    "RebuildPlanner",
+    "RebuildReport",
     "TrackedFunction",
     "equivalent",
     "parse_path",
     "stable_key",
+    "target",
     "tracked",
 ]

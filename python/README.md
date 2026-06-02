@@ -72,6 +72,38 @@ that path or a parent slice need to be revalidated. If `build_head` returns a
 new module with the same structural fingerprint, the cached old module is reused
 so existing weights and optimizer references can survive where appropriate.
 
+## Rebuild planning
+
+`RebuildPlanner` builds named `ComponentGraph` targets for a config snapshot and
+then reports which targets were preserved or rebuilt after a later config
+snapshot:
+
+```python
+from pysalsa import ComponentGraph, RebuildPlanner, target
+
+graph = ComponentGraph()
+
+@graph.component("head")
+def build_head(ctx, task_name):
+    return make_head(ctx.read(("tasks", task_name, "head_config")))
+
+def targets(config):
+    for task_name in sorted(config["tasks"]):
+        yield target("head", task_name)
+
+planner = RebuildPlanner(graph, loaded_yaml_dict, targets)
+report = planner.rebuild(next_yaml_dict)
+print(report.to_golden()["rebuild_set"])
+```
+
+`report.executed` includes every component builder that actually ran, including
+dependencies outside the selected target set. `report.executed_targets` is the
+selected-target-only subset.
+
+The first planner tests use synthetic neural-net YAML examples to lock down
+expected rebuild sets for head-only edits, unrelated metadata edits, encoder
+shape cascades, and adding tasks that require previously pruned feature modules.
+
 ## Why not bind the Rust crate directly?
 
 The Rust implementation gets much of its ergonomics from macros and Rust's type

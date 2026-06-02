@@ -301,8 +301,14 @@ class ConfigInput:
         revision = self._db._advance_revision(durability)
 
         for path in tuple(state.known_paths):
-            old_value = _read_path(state.data, path, MISSING)
-            new_value = _read_path(new_data, path, MISSING)
+            try:
+                old_value = _read_path(state.data, path)
+            except KeyError:
+                old_value = MISSING
+            try:
+                new_value = _read_path(new_data, path)
+            except KeyError:
+                new_value = MISSING
             if not state.equals(old_value, new_value):
                 state.path_changed_at[path] = revision
 
