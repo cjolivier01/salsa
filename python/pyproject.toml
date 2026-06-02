@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pysalsa-port"
+version = "0.1.0"
+description = "A Python port of Salsa-style incremental queries with optional PyTorch helpers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Salsa contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+pytorch = ["torch"]
+yaml = ["PyYAML"]
+dev = ["pytest", "PyYAML", "torch"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pysalsa"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

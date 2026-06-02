@@ -1,0 +1,82 @@
+# pysalsa-port
+
+This is a Python-first port of Salsa's core incremental-computation model.
+It is intentionally not a direct translation of the Rust macro system.
+The useful behavior for Python model building is:
+
+- mutable input roots held in a database
+- pure tracked functions that memoize by call key
+- dependency tracking while tracked functions run
+- lazy red-green-style verification after input changes
+- backdating when a recomputed value is equivalent to the old value
+- field-level config dependencies for large YAML-derived dictionaries
+- optional PyTorch helpers for preserving module identity when structure is unchanged
+
+The package lives under `python/` so it can evolve without disturbing the Rust crate.
+
+## Minimal query example
+
+```python
+from pysalsa import Database, tracked
+
+db = Database()
+source = db.input(22)
+events = []
+
+@tracked
+def half(db, value):
+    events.append("half")
+    return value.get() // 2
+
+@tracked
+def doubled_half(db, value):
+    events.append("doubled_half")
+    return half(db, value) * 2
+
+assert doubled_half(db, source) == 22
+events.clear()
+
+source.set(23)
+assert doubled_half(db, source) == 22
+assert events == ["half"]
+```
+
+Changing `22` to `23` re-runs `half`, but the value is still `11`.
+The old value is backdated, so `doubled_half` is not re-run.
+
+## Config-driven model building
+
+Use `Database.config(...)` for YAML-derived dictionaries.
+Tracked builders should read the narrowest paths they actually consume:
+
+```python
+from pysalsa import Database, tracked
+from pysalsa.pytorch import modules_equivalent
+
+db = Database()
+config = db.config(loaded_yaml_dict)
+
+@tracked(equals=modules_equivalent)
+def build_head(db, cfg, task_name):
+    head_config = cfg.read(("tasks", task_name, "head_config"))
+    input_mapping = cfg.read(("tasks", task_name, "input_mapping"), default={})
+    shapes = {
+        alias: feature_shape(db, cfg, source_path)
+        for source_path, alias in input_mapping.items()
+    }
+    return make_torch_head(task_name, head_config, shapes)
+```
+
+If `tasks.object_detection.head_config.hidden_dim` changes, only queries that read
+that path or a parent slice need to be revalidated. If `build_head` returns a
+new module with the same structural fingerprint, the cached old module is reused
+so existing weights and optimizer references can survive where appropriate.
+
+## Why not bind the Rust crate directly?
+
+The Rust implementation gets much of its ergonomics from macros and Rust's type
+system: `#[salsa::input]`, `#[salsa::tracked]`, tracked structs, interned ids,
+and generated storage. A Python extension could eventually reuse lower-level
+Rust storage, but Python still needs a dynamic query layer for YAML paths,
+runtime task names, PyTorch modules, and custom equality/reuse policies.
+This package starts with that Python layer.
