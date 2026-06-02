@@ -153,13 +153,28 @@ manager = PostPassManager(
     ]
 )
 
-changed_paths = [*result.added_paths, *result.rebuilt_paths, *result.removed_paths]
-manager.apply(model, changed_paths=changed_paths)
+changed_paths = [*result.added_paths, *result.rebuilt_paths]
+manager.apply(
+    model,
+    changed_paths=changed_paths,
+    removed_paths=result.removed_paths,
+    optimizer=optimizer,
+)
 ```
 
 The included passes are safe to rerun. Parameter tying restores aliases after a
-partial rebuild, low-precision patching does not double-wrap `forward`, and
-annotation refresh updates paths for newly inserted modules.
+partial rebuild without recreating removed aliases. When an optimizer is passed
+to the manager, it prunes parameters that post-passes made unreachable, such as
+discarded alias parameters after tying.
+
+Low-precision patching is currently a stable hook/marker scaffold: it wraps
+`forward` once, stores caller state, and restores the original method when
+disabled, but it does not perform dtype conversion by itself yet. Annotation
+refresh visits duplicate module aliases and records all visible annotation paths
+on shared modules.
+
+Use `force=True` when a post-pass's own configuration or state changed and the
+latest morph paths do not overlap the pass's module paths.
 
 ## Why not bind the Rust crate directly?
 

@@ -41,22 +41,32 @@ identity and returning optimizer-repair data.
    - Define `PostPass`, `PostPassManager`, and `PostPassResult`.
    - Let passes decide whether they should run for the changed module paths
      reported by a morph.
+   - Track removed paths separately from added/rebuilt paths so post-passes do
+     not recreate intentionally removed modules.
+   - Propagate touched paths between passes during path-scoped runs.
    - Keep pass application explicit and idempotent.
+   - Let the manager prune optimizers back to live model parameters after
+     topology-changing post-passes.
 
 2. Add idempotent parameter tying.
    - Apply primary-to-alias module identity sharing.
    - Reapplying is a no-op.
    - Reapplying after a morph restores alias identity.
+   - Skip removed or absent tied paths without recreating them.
 
 3. Add low-precision forward patching.
    - Patch `Linear`/`Conv2d` once.
    - Store the true original forward.
    - Reapplying with new state updates state without double-wrapping.
    - Disabling restores the original forward and removes patch markers.
+   - Treat this as a hook/marker scaffold; actual dtype conversion remains
+     future work.
 
 4. Add annotation refresh.
    - Recompute `_annotation` paths after morphs.
    - Newly inserted modules receive correct paths.
+   - Visit duplicate module aliases and record all visible annotation paths on
+     shared modules.
 
 ## Completed So Far
 
