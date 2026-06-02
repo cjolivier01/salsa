@@ -15,7 +15,7 @@ dependencies = []
 [project.optional-dependencies]
 pytorch = ["torch"]
 yaml = ["PyYAML"]
-dev = ["pytest", "PyYAML"]
+dev = ["pytest", "PyYAML", "torch"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pysalsa"]

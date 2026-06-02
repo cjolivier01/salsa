@@ -50,6 +50,43 @@ def _type_name(value: Any) -> str:
     return f"{typ.__module__}.{typ.__qualname__}"
 
 
+def _attribute_fingerprint(value: Any) -> tuple[Any, ...]:
+    torch = _torch()
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return ("literal", value)
+    if isinstance(value, (tuple, list)):
+        return (type(value).__name__, tuple(_attribute_fingerprint(item) for item in value))
+    if isinstance(value, dict):
+        return (
+            "dict",
+            tuple(
+                sorted(
+                    ((_attribute_fingerprint(key), _attribute_fingerprint(item)) for key, item in value.items()),
+                    key=repr,
+                )
+            ),
+        )
+    if torch.is_tensor(value):
+        return tensor_fingerprint(value)
+    if isinstance(value, torch.nn.Module):
+        return ("module-ref", _type_name(value))
+    if isinstance(value, torch.nn.Parameter):
+        return tensor_fingerprint(value)
+    return ("repr", _type_name(value), repr(value))
+
+
+def _module_attributes(module: Any) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    torch = _torch()
+    attrs = []
+    for name, value in vars(module).items():
+        if name.startswith("_"):
+            continue
+        if callable(value) or isinstance(value, (torch.nn.Module, torch.nn.Parameter)):
+            continue
+        attrs.append((name, _attribute_fingerprint(value)))
+    return tuple(sorted(attrs))
+
+
 def module_fingerprint(module: Any, *, include_parameter_values: bool = False) -> tuple[Any, ...]:
     """Return a structural fingerprint for a ``torch.nn.Module``.
 
@@ -78,6 +115,9 @@ def module_fingerprint(module: Any, *, include_parameter_values: bool = False) -
     return (
         "module",
         _type_name(module),
+        module.extra_repr(),
+        bool(module.training),
+        _module_attributes(module),
         tuple(parameters),
         tuple(buffers),
         tuple(children),

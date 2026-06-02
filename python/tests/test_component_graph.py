@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from pysalsa import ComponentGraph, Database
 
 
@@ -53,3 +55,18 @@ def test_component_graph_reuses_unchanged_component_values() -> None:
     assert graph.build(db, cfg, "head", "a") is not head_a
     assert graph.build(db, cfg, "head", "b") is head_b
     assert calls == ["head:a"]
+
+
+def test_component_graph_rejects_registration_after_use() -> None:
+    graph = ComponentGraph()
+
+    @graph.component("value")
+    def value(ctx):
+        return 1
+
+    db = Database()
+    cfg = db.config({})
+    assert graph.build(db, cfg, "value") == 1
+
+    with pytest.raises(RuntimeError, match="after a ComponentGraph has been used"):
+        graph.register("value", lambda ctx: 2)

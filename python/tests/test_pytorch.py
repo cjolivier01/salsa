@@ -38,6 +38,31 @@ def test_tracked_module_reuses_old_module_when_structure_is_equal() -> None:
     assert calls == [4, 5, 4]
 
 
+def test_module_equivalence_includes_behavioral_attributes() -> None:
+    assert not modules_equivalent(torch.nn.Dropout(p=0.1), torch.nn.Dropout(p=0.9))
+    assert not modules_equivalent(torch.nn.ReLU(inplace=False), torch.nn.ReLU(inplace=True))
+    assert not modules_equivalent(
+        torch.nn.Conv2d(3, 4, kernel_size=3, stride=1),
+        torch.nn.Conv2d(3, 4, kernel_size=3, stride=2),
+    )
+
+
+def test_tracked_module_rebuilds_when_parameterless_behavior_changes() -> None:
+    db = Database()
+    probability = db.input(0.1)
+
+    @tracked(equals=modules_equivalent)
+    def build_dropout(db: Database, value):
+        return torch.nn.Dropout(p=value.get())
+
+    first = build_dropout(db, probability)
+    assert probability.set(0.9)
+    second = build_dropout(db, probability)
+
+    assert second is not first
+    assert second.p == 0.9
+
+
 def test_preserve_torch_rng_restores_state() -> None:
     torch.manual_seed(1234)
     expected = torch.rand(3)

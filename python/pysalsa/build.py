@@ -63,6 +63,7 @@ class ComponentGraph:
     def __init__(self) -> None:
         self._specs: dict[str, ComponentSpec] = {}
         self._versions: dict[str, int] = {}
+        self._frozen = False
 
     def component(
         self,
@@ -85,6 +86,8 @@ class ComponentGraph:
         equals: Callable[[Any, Any], bool] | None = None,
         reuse_on_equal: bool = True,
     ) -> None:
+        if self._frozen:
+            raise RuntimeError("cannot register components after a ComponentGraph has been used")
         version = self._versions.get(name, 0) + 1
         self._versions[name] = version
         self._specs[name] = ComponentSpec(
@@ -96,6 +99,7 @@ class ComponentGraph:
         )
 
     def build(self, db: Database, config: ConfigInput, name: str, *key: Any) -> Any:
+        self._frozen = True
         return _build_component(db, self, config, name, tuple(key)).value
 
 

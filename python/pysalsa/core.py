@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import contextvars
 import functools
 import itertools
 from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -13,6 +14,10 @@ R = TypeVar("R")
 T = TypeVar("T")
 
 MISSING = object()
+_CURRENT_DATABASE: contextvars.ContextVar["Database | None"] = contextvars.ContextVar(
+    "pysalsa_current_database",
+    default=None,
+)
 
 
 class Durability(IntEnum):
@@ -107,6 +112,10 @@ def _safe_deepcopy(value: T) -> T:
         return value
 
 
+def _sort_key(value: Any) -> str:
+    return repr(value)
+
+
 def stable_key(value: Any) -> Hashable:
     """Return a stable-ish hash key for query arguments.
 
@@ -125,11 +134,14 @@ def stable_key(value: Any) -> Hashable:
         return ("list", tuple(stable_key(item) for item in value))
     if isinstance(value, dict):
         items = tuple(
-            sorted((stable_key(key), stable_key(item)) for key, item in value.items())
+            sorted(
+                ((stable_key(key), stable_key(item)) for key, item in value.items()),
+                key=_sort_key,
+            )
         )
         return ("dict", items)
     if isinstance(value, set):
-        return ("set", tuple(sorted(stable_key(item) for item in value)))
+        return ("set", tuple(sorted((stable_key(item) for item in value), key=_sort_key)))
     if is_dataclass(value) and not isinstance(value, type):
         return (
             "dataclass",
@@ -181,6 +193,12 @@ def _dedupe_dependencies(dependencies: Iterable[_Dependency]) -> tuple[_Dependen
     return tuple(by_key.values())
 
 
+def _ensure_current_database(db: "Database") -> None:
+    current = _CURRENT_DATABASE.get()
+    if current is not None and current is not db:
+        raise ValueError("cannot read an input or config owned by a different Database")
+
+
 class Input(Generic[T]):
     """A mutable root value stored in a :class:`Database`."""
 
@@ -190,11 +208,12 @@ class Input(Generic[T]):
         self._db = db
         self._id = input_id
 
-    def get(self) -> T:
+    def get(self, *, copy_value: bool = True) -> T:
+        _ensure_current_database(self._db)
         state = self._db._inputs[self._id]
         key = _DependencyKey("input", (self._id,))
         self._db._record_dependency(key, state.changed_at)
-        return state.value
+        return _safe_deepcopy(state.value) if copy_value else state.value
 
     def set(self, value: T, *, durability: Durability | None = None) -> bool:
         """Set a new value.
@@ -209,7 +228,7 @@ class Input(Generic[T]):
         if durability is None:
             durability = state.durability
         revision = self._db._advance_revision(durability)
-        state.value = value
+        state.value = _safe_deepcopy(value)
         state.durability = durability
         state.changed_at = revision
         return True
@@ -240,6 +259,7 @@ class ConfigInput:
         self._id = config_id
 
     def read(self, path: str | Iterable[Any] = (), *, default: Any = MISSING, copy_value: bool = True) -> Any:
+        _ensure_current_database(self._db)
         normalized = parse_path(path)
         state = self._db._configs[self._id]
         if normalized not in state.known_paths:
@@ -262,7 +282,10 @@ class ConfigInput:
         result: dict[tuple[Any, ...], Any] = {}
         for path in paths:
             normalized = parse_path(path)
-            default = defaults.get(path, defaults.get(normalized, MISSING))
+            try:
+                default = defaults.get(path, defaults.get(normalized, MISSING))
+            except TypeError:
+                default = defaults.get(normalized, MISSING)
             result[normalized] = self.read(normalized, default=default, copy_value=copy_value)
         return result
 
@@ -410,7 +433,7 @@ class Database:
     ) -> Input[T]:
         input_id = next(self._input_ids)
         self._inputs[input_id] = _InputState(
-            value=value,
+            value=_safe_deepcopy(value),
             changed_at=self._revision,
             durability=durability,
             equals=equals or equivalent,
@@ -447,7 +470,9 @@ class Database:
 
     def _advance_revision(self, durability: Durability) -> int:
         self._revision += 1
-        self._durability_changed_at[durability] = self._revision
+        for level in Durability:
+            if level <= durability:
+                self._durability_changed_at[level] = self._revision
         return self._revision
 
     def _record_dependency(self, key: _DependencyKey, changed_at: int) -> None:
@@ -517,10 +542,12 @@ class Database:
 
         active = _ActiveQuery(key)
         self._active.append(active)
+        token = _CURRENT_DATABASE.set(self)
         self.query_executions += 1
         try:
             new_value = tracked_fn.fn(self, *args, **kwargs)
         finally:
+            _CURRENT_DATABASE.reset(token)
             popped = self._active.pop()
             assert popped is active
 
