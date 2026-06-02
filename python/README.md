@@ -104,6 +104,34 @@ The first planner tests use synthetic neural-net YAML examples to lock down
 expected rebuild sets for head-only edits, unrelated metadata edits, encoder
 shape cascades, and adding tasks that require previously pruned feature modules.
 
+## PyTorch morphing
+
+`ModelMorpher` applies planner snapshots to an existing `nn.Module` tree:
+
+```python
+from pysalsa.pytorch import ModelMorpher
+
+def path_for(component):
+    if component.name == "head":
+        return ("heads", component.key[0])
+    raise KeyError(component)
+
+morpher = ModelMorpher(model, path_for, refresh=lambda root: root.rebuild_caches())
+morpher.install(planner.snapshot)
+
+report = planner.rebuild(next_yaml_dict)
+result = morpher.apply(planner.snapshot, report, optimizer=optimizer)
+result.refresh_optimizer(optimizer)
+```
+
+The morpher replaces only added and rebuilt modules, removes disappeared
+targets, leaves reused modules untouched, and returns parameter ids/objects
+needed to repair optimizer param groups.
+Pass the optimizer to `apply` when preserving per-group settings matters.
+Component paths must be unique and non-overlapping; nested module paths are
+supported, but one component path cannot be the parent of another component path
+in the same morph.
+
 ## Why not bind the Rust crate directly?
 
 The Rust implementation gets much of its ergonomics from macros and Rust's type
