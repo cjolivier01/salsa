@@ -132,6 +132,50 @@ Component paths must be unique and non-overlapping; nested module paths are
 supported, but one component path cannot be the parent of another component path
 in the same morph.
 
+## PyTorch post-passes
+
+`PostPassManager` runs idempotent tree mutations after a morph:
+
+```python
+from pysalsa.pytorch_postpass import (
+    AnnotationPass,
+    LowPrecisionPatchPass,
+    LowPrecisionState,
+    ParameterTyingPass,
+    PostPassManager,
+)
+
+manager = PostPassManager(
+    [
+        ParameterTyingPass([["encoders.cam_a", "encoders.cam_b"]]),
+        LowPrecisionPatchPass(LowPrecisionState(tag="qat"), module_paths=["heads"]),
+        AnnotationPass("MultiTaskNet"),
+    ]
+)
+
+changed_paths = [*result.added_paths, *result.rebuilt_paths]
+manager.apply(
+    model,
+    changed_paths=changed_paths,
+    removed_paths=result.removed_paths,
+    optimizer=optimizer,
+)
+```
+
+The included passes are safe to rerun. Parameter tying restores aliases after a
+partial rebuild without recreating removed aliases. When an optimizer is passed
+to the manager, it prunes parameters that post-passes made unreachable, such as
+discarded alias parameters after tying.
+
+Low-precision patching is currently a stable hook/marker scaffold: it wraps
+`forward` once, stores caller state, and restores the original method when
+disabled, but it does not perform dtype conversion by itself yet. Annotation
+refresh visits duplicate module aliases and records all visible annotation paths
+on shared modules.
+
+Use `force=True` when a post-pass's own configuration or state changed and the
+latest morph paths do not overlap the pass's module paths.
+
 ## Why not bind the Rust crate directly?
 
 The Rust implementation gets much of its ergonomics from macros and Rust's type
